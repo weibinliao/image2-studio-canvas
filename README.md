@@ -1,6 +1,6 @@
-# Image2 Studio
+# Image2 Studio Canvas
 
-Image2 Studio is a self-hosted web console for multi-provider image generation. It supports OpenAI-compatible image APIs and Gemini native image generation, with separate administrator and member views.
+Image2 Studio Canvas is the canvas edition of the self-hosted Image2 Studio web console for multi-provider image generation. It adds the visual canvas workflow while retaining OpenAI-compatible and Gemini native image generation, with separate administrator and member views.
 
 The repository contains application source code only. API keys, channel configuration, generated images, user history, audit logs, and runtime settings are intentionally excluded.
 
@@ -26,8 +26,8 @@ No third-party npm packages are required.
 ## Quick Start
 
 ~~~powershell
-git clone https://github.com/YOUR_ACCOUNT/image2-studio.git
-cd image2-studio
+git clone https://github.com/weibinliao/image2-studio-canvas.git
+cd image2-studio-canvas
 Copy-Item .env.example .env
 npm start
 ~~~
