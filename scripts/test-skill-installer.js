@@ -7,7 +7,7 @@ import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { buildSkillInstallCommand, buildSkillInstallScript, buildSkillManifest, buildSkillPackage } from '../skill-package.js';
+import { buildSkillInstallCommand, buildSkillInstallScript, buildSkillManifest, buildSkillPackage, buildSkillVerifyCommand } from '../skill-package.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const execFileAsync = promisify(execFile);
@@ -54,26 +54,42 @@ test('remote installer endpoints require HTTPS outside loopback', async () => {
   );
 });
 
-test('LAN installer is allowed and falls back to the GitHub package', async () => {
+test('LAN installer uses only the current dynamic Image2 Studio service', async () => {
   const serverUrl = 'http://192.168.1.103:3020';
   const skillDir = path.join(root, 'codex-skill', 'image2-studio-generate');
   const command = buildSkillInstallCommand({ serverUrl, allowInsecureLan: true });
   const script = buildSkillInstallScript({ serverUrl, allowInsecureLan: true });
+  const commandScript = decodePowerShellCommand(command);
 
-  assert.match(command, /api\/codex-skill\/install\.ps1/);
-  assert.match(script, /https:\/\/github\.com\/weibinliao\/image2-studio\/archive\/refs\/heads\/main\.zip/);
-  assert.match(script, /Join-Path \$extractPath \$githubArchiveRoot/);
-  assert.match(script, /IMAGE2_STUDIO_PACKAGE_URL/);
+  assert.match(command, /-EncodedCommand/);
+  assert.match(commandScript, /api\/codex-skill\/install\.ps1/);
+  assert.match(commandScript, /\$server='http:\/\/192\.168\.1\.103:3020'/);
+  assert.doesNotMatch(commandScript, /github/i);
+  assert.doesNotMatch(script, /github|githubArchive|IMAGE2_STUDIO_PACKAGE_URL/i);
   assert.ok(script.includes("$relativePath = ([string]$file.path).Replace('\\', '/')"));
   assert.ok(script.includes("-match '(^|/)\\.\\.(?:/|$)'"));
-  assert.match(script, /generator\.Contains/);
   await assert.doesNotReject(() => buildSkillPackage({ skillDir, serverUrl, allowInsecureLan: true }));
   await assert.doesNotReject(() => buildSkillManifest({ skillDir, serverUrl, allowInsecureLan: true }));
 });
 
-test('PowerShell download command writes the installer file', { skip: process.platform !== 'win32' }, async () => {
+test('verification command checks both Agent roots and the dynamic service URL', () => {
+  const command = buildSkillVerifyCommand({
+    serverUrl: 'http://192.168.1.103:3020',
+    allowInsecureLan: true,
+  });
+  const script = decodePowerShellCommand(command);
+
+  assert.match(script, /http:\/\/192\.168\.1\.103:3020/);
+  assert.match(script, /\.agents/);
+  assert.match(script, /\.codex/);
+  assert.match(script, /generate-image\.mjs/);
+  assert.match(script, /api\/status/);
+  assert.doesNotMatch(script, /github/i);
+});
+
+test('PowerShell install command downloads and executes the current service installer', { skip: process.platform !== 'win32' }, async () => {
   const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'image2-skill-download-command-'));
-  const destination = path.join(testRoot, 'install-image2-studio-skill.ps1');
+  const markerPath = path.join(testRoot, 'installer-ran.txt');
   const server = http.createServer();
 
   try {
@@ -89,23 +105,42 @@ test('PowerShell download command writes the installer file', { skip: process.pl
         return;
       }
       response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-      response.end("Write-Host 'Image2 Skill installer'");
+      response.end(`[IO.File]::WriteAllText('${markerPath.replaceAll("'", "''")}', 'executed')`);
     });
 
+    const encoded = buildSkillInstallCommand({ serverUrl }).match(/-EncodedCommand\s+(\S+)/)?.[1];
+    assert.ok(encoded);
     await execFileAsync('powershell.exe', [
       '-NoProfile',
-      '-Command',
-      buildSkillInstallCommand({ serverUrl }),
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      encoded,
     ], {
       env: { ...process.env, TEMP: testRoot, TMP: testRoot },
       windowsHide: true,
     });
 
-    assert.equal(await fs.readFile(destination, 'utf8'), "Write-Host 'Image2 Skill installer'");
+    assert.equal(await fs.readFile(markerPath, 'utf8'), 'executed');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await fs.rm(testRoot, { recursive: true, force: true });
   }
+});
+
+test('canvas webpage exposes dynamic install and verification commands to every visitor', async () => {
+  const [html, app] = await Promise.all([
+    fs.readFile(path.join(root, 'public', 'index.html'), 'utf8'),
+    fs.readFile(path.join(root, 'public', 'app.js'), 'utf8'),
+  ]);
+
+  assert.match(html, /id="installSkillButton"/);
+  assert.match(html, /id="verifySkillButton"/);
+  assert.doesNotMatch(html, /class="[^"]*admin-only[^"]*" id="(?:install|verify)SkillButton"/);
+  assert.match(app, /api\/codex-skill\/install-command/);
+  assert.match(app, /api\/codex-skill\/verify-command/);
+  assert.doesNotMatch(app, /api\/codex-skill\/install-local/);
+  assert.doesNotMatch(app, /github/i);
 });
 
 test('Skill persists and reuses its signed session cookie', async () => {
@@ -362,4 +397,10 @@ async function listRelativeFiles(directory) {
   }
   await walk(directory);
   return files.sort();
+}
+
+function decodePowerShellCommand(command) {
+  const encoded = String(command).match(/-EncodedCommand\s+(\S+)/)?.[1];
+  assert.ok(encoded, 'PowerShell command should contain an encoded payload');
+  return Buffer.from(encoded, 'base64').toString('utf16le');
 }

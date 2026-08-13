@@ -27,9 +27,13 @@
       <span class="mark" id="brandIcon">I2</span>
       <span class="wordmark" id="brandName">Image2 Studio</span>
       <div class="chrome-right">
-        <button type="button" class="skill-quick-action admin-only" id="installSkillButton" aria-label="导入 Image2 Skill" title="导入 Image2 Skill 到本机 Agent">
+        <button type="button" class="skill-quick-action" id="installSkillButton" aria-label="复制 Image2 Skill 安装命令" title="复制绑定当前 Image2 Studio 的 Skill 安装命令">
           <span class="skill-quick-icon" aria-hidden="true">↓</span>
-          <span id="installSkillLabel">导入 Skill</span>
+          <span id="installSkillLabel">安装 Skill</span>
+        </button>
+        <button type="button" class="skill-quick-action skill-verify-action" id="verifySkillButton" aria-label="复制 Image2 Skill 验证命令" title="复制 Skill 安装验证命令">
+          <span class="skill-quick-icon" aria-hidden="true">✓</span>
+          <span id="verifySkillLabel">验证</span>
         </button>
         <span class="skill-quick-status" id="skillInstallStatus" aria-live="polite"></span>
         <span class="pulse admin-only" id="channelPulse"></span>
