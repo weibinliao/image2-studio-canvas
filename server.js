@@ -22,7 +22,7 @@ import {
   updateEngineModel,
   validateImageEngine,
 } from './engine-routing.js';
-import { buildSkillInstallCommand, buildSkillInstallScript, buildSkillManifest, buildSkillPackage } from './skill-package.js';
+import { buildSkillInstallCommand, buildSkillInstallScript, buildSkillManifest, buildSkillPackage, buildSkillVerifyCommand } from './skill-package.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -77,7 +77,6 @@ let roundRobinIndex = -1;
 await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
 const CLIENT_TOKEN_COOKIE = 'image2_client_token';
-const SKILL_SERVER_URL_TOKEN = "'IMAGE2_STUDIO_PACKAGE_URL'";
 const serverSecret = await ensureServerSecret();
 await restoreJobs();
 
@@ -101,15 +100,12 @@ const server = http.createServer(async (req, res) => {
       return handleCodexSkillInstallCommand(req, res);
     }
 
-    if (req.method === 'GET' && requestUrl.pathname === '/api/codex-skill/install.ps1') {
-      return handleCodexSkillInstallScript(req, res, requestUrl);
+    if (req.method === 'GET' && requestUrl.pathname === '/api/codex-skill/verify-command') {
+      return handleCodexSkillVerifyCommand(req, res);
     }
 
-    if (req.method === 'POST' && requestUrl.pathname === '/api/codex-skill/install-local') {
-      if (!isAdminRequest(req) || req.headers['x-image2-local-install'] !== '1') {
-        return json(res, 403, { error: 'Only the local Image2 Studio administrator can install the local Skill.' });
-      }
-      return await handleLocalSkillInstall(req, res);
+    if (req.method === 'GET' && requestUrl.pathname === '/api/codex-skill/install.ps1') {
+      return handleCodexSkillInstallScript(req, res, requestUrl);
     }
 
     if (req.method === 'GET' && requestUrl.pathname === '/api/keys') {
@@ -2304,8 +2300,8 @@ function json(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
-function text(res, status, payload) {
-  res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
+function text(res, status, payload, headers = {}) {
+  res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', ...headers });
   res.end(payload);
 }
 
@@ -2506,7 +2502,7 @@ async function handleCodexSkillDownload(req, res) {
   try {
     archive = await buildSkillPackage({
       skillDir: CODEX_SKILL_DIR,
-      ...resolveSkillPackageOptions(),
+      ...resolveSkillPackageOptions(req),
     });
   } catch (error) {
     return text(res, 409, error.message || 'Unable to prepare the remote Skill package.');
@@ -2524,7 +2520,7 @@ async function handleCodexSkillManifest(req, res) {
   try {
     return json(res, 200, await buildSkillManifest({
       skillDir: CODEX_SKILL_DIR,
-      ...resolveSkillPackageOptions(),
+      ...resolveSkillPackageOptions(req),
     }));
   } catch (error) {
     return text(res, 409, error.message || 'Unable to prepare the remote Skill manifest.');
@@ -2533,16 +2529,30 @@ async function handleCodexSkillManifest(req, res) {
 
 function handleCodexSkillInstallCommand(req, res) {
   try {
-    return text(res, 200, buildSkillInstallCommand(resolveSkillPackageOptions()));
+    const options = resolveSkillPackageOptions(req);
+    return text(res, 200, buildSkillInstallCommand(options), {
+      'X-Image2-Skill-Server': options.serverUrl,
+    });
   } catch (error) {
     return text(res, 409, error.message || 'Unable to prepare the remote Skill installer.');
+  }
+}
+
+function handleCodexSkillVerifyCommand(req, res) {
+  try {
+    const options = resolveSkillPackageOptions(req);
+    return text(res, 200, buildSkillVerifyCommand(options), {
+      'X-Image2-Skill-Server': options.serverUrl,
+    });
+  } catch (error) {
+    return text(res, 409, error.message || 'Unable to prepare the remote Skill verification command.');
   }
 }
 
 function handleCodexSkillInstallScript(req, res, requestUrl) {
   let script;
   try {
-    script = buildSkillInstallScript(resolveSkillPackageOptions());
+    script = buildSkillInstallScript(resolveSkillPackageOptions(req));
   } catch (error) {
     return text(res, 409, error.message || 'Unable to prepare the remote Skill installer.');
   }
@@ -2555,80 +2565,6 @@ function handleCodexSkillInstallScript(req, res, requestUrl) {
   }
   res.writeHead(200, headers);
   res.end(script);
-}
-
-async function handleLocalSkillInstall(req, res) {
-  // Prefer loopback when the server listens on all interfaces, but retain a
-  // concrete HOST binding so the installed Skill can always reach this server.
-  const serverUrl = resolveLocalSkillServerUrl();
-  const targetRoots = [
-    path.join(os.homedir(), '.agents', 'skills'),
-    path.join(os.homedir(), '.codex', 'skills'),
-  ];
-  const targets = [];
-
-  for (const targetRoot of [...new Set(targetRoots.map((value) => path.resolve(value)))]) {
-    targets.push(await installLocalSkillDirectory(targetRoot, serverUrl));
-  }
-
-  return json(res, 200, { ok: true, targets });
-}
-
-async function installLocalSkillDirectory(targetRoot, serverUrl) {
-  const targetDir = path.join(targetRoot, 'image2-studio-generate');
-  const stagingDir = `${targetDir}.next-${crypto.randomUUID()}`;
-  const backupDir = `${targetDir}.backup-${crypto.randomUUID()}`;
-  let movedExisting = false;
-
-  await fs.mkdir(targetRoot, { recursive: true });
-  try {
-    await fs.cp(CODEX_SKILL_DIR, stagingDir, { recursive: true });
-    await patchInstalledSkillServerUrl(stagingDir, serverUrl);
-    await validateInstalledSkillDirectory(stagingDir);
-
-    try {
-      await fs.rename(targetDir, backupDir);
-      movedExisting = true;
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
-
-    await fs.rename(stagingDir, targetDir);
-    if (movedExisting) await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
-    return targetDir;
-  } catch (error) {
-    if (movedExisting && !(await pathExists(targetDir)) && await pathExists(backupDir)) {
-      await fs.rename(backupDir, targetDir).catch(() => {});
-    }
-    throw error;
-  } finally {
-    await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-  }
-}
-
-async function validateInstalledSkillDirectory(skillDir) {
-  await Promise.all([
-    fs.access(path.join(skillDir, 'SKILL.md')),
-    fs.access(path.join(skillDir, 'scripts', 'generate-image.mjs')),
-  ]);
-}
-
-async function pathExists(target) {
-  try {
-    await fs.access(target);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function patchInstalledSkillServerUrl(skillDir, serverUrl) {
-  const scriptPath = path.join(skillDir, 'scripts', 'generate-image.mjs');
-  const source = await fs.readFile(scriptPath, 'utf8');
-  const next = source.includes(SKILL_SERVER_URL_TOKEN)
-    ? source.replace(SKILL_SERVER_URL_TOKEN, JSON.stringify(serverUrl))
-    : source.replace(/const packagedBaseUrl = ['"][^'"]*['"];/, `const packagedBaseUrl = ${JSON.stringify(serverUrl)};`);
-  await fs.writeFile(scriptPath, next, 'utf8');
 }
 
 function isAdminRequest(req) {
@@ -3193,16 +3129,40 @@ function getLanUrls() {
   return urls;
 }
 
-function resolveSkillServerUrl() {
-  return config.publicBaseURL || getLanUrls()[0] || `http://127.0.0.1:${config.port}`;
+function resolveSkillServerUrl(req) {
+  if (config.publicBaseURL) return config.publicBaseURL;
+  const requestOrigin = getRequestOrigin(req);
+  if (requestOrigin && !isLoopbackOrigin(requestOrigin)) return requestOrigin;
+  return getLanUrls()[0] || requestOrigin || `http://127.0.0.1:${config.port}`;
 }
 
-function resolveSkillPackageOptions() {
-  const serverUrl = resolveSkillServerUrl();
+function resolveSkillPackageOptions(req) {
+  const serverUrl = resolveSkillServerUrl(req);
   return {
     serverUrl,
     allowInsecureLan: isKnownLanSkillUrl(serverUrl),
   };
+}
+
+function getRequestOrigin(req) {
+  const host = String(req.headers.host || '').trim();
+  if (!host) return '';
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  const proto = forwardedProto === 'https' ? 'https' : 'http';
+  try {
+    return new URL(`${proto}://${host}`).origin;
+  } catch {
+    return '';
+  }
+}
+
+function isLoopbackOrigin(value) {
+  try {
+    const hostname = new URL(value).hostname;
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return false;
+  }
 }
 
 function isKnownLanSkillUrl(value) {
@@ -3217,15 +3177,6 @@ function isKnownLanSkillUrl(value) {
   } catch {
     return false;
   }
-}
-
-function resolveLocalSkillServerUrl() {
-  const configuredHost = String(config.host || '').trim();
-  let host = configuredHost;
-  if (!host || host === '0.0.0.0') host = '127.0.0.1';
-  if (host === '::') host = '::1';
-  const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
-  return `http://${formattedHost}:${config.port}`;
 }
 
 function normalizePublicBaseUrl(value) {

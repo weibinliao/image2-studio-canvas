@@ -3,8 +3,6 @@ import path from 'node:path';
 
 const PACKAGE_ROOT = 'image2-studio-generate';
 const SERVER_URL_TOKEN = "'IMAGE2_STUDIO_PACKAGE_URL'";
-const GITHUB_ARCHIVE_URL = 'https://github.com/weibinliao/image2-studio/archive/refs/heads/main.zip';
-const GITHUB_ARCHIVE_ROOT = 'image2-studio-main';
 const PACKAGE_FILES = [
   'SKILL.md',
   'agents/openai.yaml',
@@ -55,10 +53,16 @@ export function buildSkillInstallCommand({ serverUrl, allowInsecureLan = false }
   const baseUrl = normalizeServerUrl(serverUrl);
   assertRemoteInstallIsSafe(baseUrl, { allowInsecureLan });
   const scriptUrl = `${baseUrl}/api/codex-skill/install.ps1`;
-  return `powershell -NoProfile -Command '$scriptPath = Join-Path $env:TEMP ''install-image2-studio-skill.ps1''; Invoke-WebRequest -UseBasicParsing ''${escapePowerShellSingleQuoted(scriptUrl)}'' -OutFile $scriptPath; Write-Host "Downloaded: $scriptPath"; Write-Host (''Run: powershell -NoProfile -ExecutionPolicy Bypass -File '' + [char]34 + $scriptPath + [char]34)'`;
+  return encodePowerShellCommand(`$server='${escapePowerShellSingleQuoted(baseUrl)}'; $installer='${escapePowerShellSingleQuoted(scriptUrl)}'; $scriptPath=Join-Path ([IO.Path]::GetTempPath()) ('image2-skill-' + [guid]::NewGuid().ToString('N') + '.ps1'); try { Write-Host ('[Image2 Skill] Connecting to ' + $server); Invoke-WebRequest -UseBasicParsing -Uri $installer -OutFile $scriptPath; & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath; if ($LASTEXITCODE -ne 0) { throw 'Image2 Skill installer failed.' } } finally { Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue }`);
 }
 
 export const buildSkillInstallPrompt = buildSkillInstallCommand;
+
+export function buildSkillVerifyCommand({ serverUrl, allowInsecureLan = false }) {
+  const baseUrl = normalizeServerUrl(serverUrl);
+  assertRemoteInstallIsSafe(baseUrl, { allowInsecureLan });
+  return encodePowerShellCommand(`$server='${escapePowerShellSingleQuoted(baseUrl)}'; $required=@('SKILL.md','agents/openai.yaml','scripts/generate-image.mjs'); $roots=@((Join-Path (Join-Path $HOME '.agents') 'skills'),(Join-Path (Join-Path $HOME '.codex') 'skills')) | Select-Object -Unique; $failed=$false; foreach($root in $roots){ $dir=Join-Path $root 'image2-studio-generate'; foreach($file in $required){ if(-not (Test-Path -LiteralPath (Join-Path $dir $file))){ Write-Host ('[Failed] Missing ' + (Join-Path $dir $file)) -ForegroundColor Red; $failed=$true } }; $entry=Join-Path $dir 'scripts/generate-image.mjs'; if(Test-Path -LiteralPath $entry){ $source=[IO.File]::ReadAllText($entry); if(-not $source.Contains($server)){ Write-Host ('[Failed] Wrong server URL in ' + $entry) -ForegroundColor Red; $failed=$true } else { Write-Host ('[Verified] ' + $dir) -ForegroundColor Green } } }; try { $status=Invoke-RestMethod -UseBasicParsing -Uri ($server + '/api/status') -Headers @{'X-Image2-Role'='member'}; Write-Host ('[Verified] Image2 Studio reachable: ' + $server) -ForegroundColor Green } catch { Write-Host ('[Failed] Image2 Studio connection: ' + $_.Exception.Message) -ForegroundColor Red; $failed=$true }; if($failed){ throw 'Image2 Skill verification failed. Reinstall the Skill.' }; Write-Host '[Complete] Restart the Agent before invoking the Skill.' -ForegroundColor Cyan`);
+}
 
 export function buildSkillInstallScript({ serverUrl, allowInsecureLan = false }) {
   const baseUrl = normalizeServerUrl(serverUrl);
@@ -71,9 +75,6 @@ export function buildSkillInstallScript({ serverUrl, allowInsecureLan = false })
     "$skillName = 'image2-studio-generate'",
     `$manifestUrl = '${escapePowerShellSingleQuoted(manifestUrl)}'`,
     `$archiveUrl = '${escapePowerShellSingleQuoted(archiveUrl)}'`,
-    `$githubArchiveUrl = '${escapePowerShellSingleQuoted(GITHUB_ARCHIVE_URL)}'`,
-    `$githubArchiveRoot = '${GITHUB_ARCHIVE_ROOT}'`,
-    `$packageUrl = '${escapePowerShellSingleQuoted(baseUrl)}'`,
     "$installHome = if ($env:IMAGE2_SKILL_HOME) { $env:IMAGE2_SKILL_HOME } else { $HOME }",
     "$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('image2-skill-' + [guid]::NewGuid().ToString('N'))",
     "$zipPath = Join-Path $tempRoot 'skill.zip'",
@@ -94,47 +95,22 @@ export function buildSkillInstallScript({ serverUrl, allowInsecureLan = false })
     "    if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'SKILL.md')) -or -not (Test-Path -LiteralPath (Join-Path $sourceDir 'scripts/generate-image.mjs'))) { throw 'Invalid Image2 Studio Skill manifest.' }",
     '  } catch {',
     '    Remove-Item -LiteralPath $sourceDir -Recurse -Force -ErrorAction SilentlyContinue',
+    '    New-Item -ItemType Directory -Path $extractPath -Force | Out-Null',
+    '    Invoke-WebRequest -UseBasicParsing -Uri $archiveUrl -OutFile $zipPath',
     '    try {',
-    '      New-Item -ItemType Directory -Path $extractPath -Force | Out-Null',
-    '      Invoke-WebRequest -UseBasicParsing -Uri $archiveUrl -OutFile $zipPath',
-    '      try {',
-    '        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop',
-    '        [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)',
-    '      } catch {',
-    '        if (Get-Command tar.exe -ErrorAction SilentlyContinue) {',
-    '          & tar.exe -xf $zipPath -C $extractPath',
-    '          if ($LASTEXITCODE -ne 0) { throw }',
-    '        } else {',
-    '          Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force',
-    '        }',
-    '      }',
-    '      $sourceDir = Join-Path $extractPath $skillName',
-    "      if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'SKILL.md')) -or -not (Test-Path -LiteralPath (Join-Path $sourceDir 'scripts/generate-image.mjs'))) { throw 'LAN archive is not a valid Image2 Studio Skill.' }",
+    '      Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop',
+    '      [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)',
     '    } catch {',
-    '      Remove-Item -LiteralPath $extractPath -Recurse -Force -ErrorAction SilentlyContinue',
-    '      Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue',
-    '      New-Item -ItemType Directory -Path $extractPath -Force | Out-Null',
-    '      Invoke-WebRequest -UseBasicParsing -Uri $githubArchiveUrl -OutFile $zipPath',
-    '      try {',
-    '        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop',
-    '        [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)',
-    '      } catch {',
-    '        if (Get-Command tar.exe -ErrorAction SilentlyContinue) {',
-    '          & tar.exe -xf $zipPath -C $extractPath',
-    '          if ($LASTEXITCODE -ne 0) { throw }',
-    '        } else {',
-    '          Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force',
-    '        }',
+    '      if (Get-Command tar.exe -ErrorAction SilentlyContinue) {',
+    '        & tar.exe -xf $zipPath -C $extractPath',
+    '        if ($LASTEXITCODE -ne 0) { throw }',
+    '      } else {',
+    '        Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force',
     '      }',
-    '      $sourceDir = Join-Path (Join-Path $extractPath $githubArchiveRoot) (Join-Path \'codex-skill\' $skillName)',
     '    }',
+    '    $sourceDir = Join-Path $extractPath $skillName',
     '  }',
     "  if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'SKILL.md')) -or -not (Test-Path -LiteralPath (Join-Path $sourceDir 'scripts/generate-image.mjs'))) { throw 'Downloaded source is not a valid Image2 Studio Skill.' }",
-    "  $generatorPath = Join-Path $sourceDir 'scripts/generate-image.mjs'",
-    '  $generator = [IO.File]::ReadAllText($generatorPath)',
-    "  $generator = $generator.Replace(\"'IMAGE2_STUDIO_PACKAGE_URL'\", (\"'\" + $packageUrl + \"'\"))",
-    "  if ($generator.Contains(\"'IMAGE2_STUDIO_PACKAGE_URL'\")) { throw 'Downloaded Skill generator is missing a usable server URL.' }",
-    '  [IO.File]::WriteAllText($generatorPath, $generator, (New-Object Text.UTF8Encoding($false)))',
     '  $targetRoots = @(',
     "    (Join-Path (Join-Path $installHome '.agents') 'skills')",
     "    (Join-Path (Join-Path $installHome '.codex') 'skills')",
@@ -157,8 +133,10 @@ export function buildSkillInstallScript({ serverUrl, allowInsecureLan = false })
     '    } finally {',
     '      if (Test-Path -LiteralPath $stagingDir) { Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue }',
     '    }',
-    '    Write-Host "Installed Image2 Studio Skill -> $targetDir"',
+    '    Write-Host "[Installed] Image2 Studio Skill -> $targetDir"',
     '  }',
+    `  Write-Host '[Complete] Skill bound to Image2 Studio: ${escapePowerShellSingleQuoted(baseUrl)}' -ForegroundColor Cyan`,
+    "  Write-Host '[Next] Restart the Agent before invoking the Skill.'",
     '} finally {',
     '  if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }',
     '}',
@@ -194,6 +172,10 @@ function isPrivateNetworkHost(host) {
 
 function escapePowerShellSingleQuoted(value) {
   return String(value).replaceAll("'", "''");
+}
+
+function encodePowerShellCommand(script) {
+  return `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`;
 }
 
 function createStoredZip(files) {

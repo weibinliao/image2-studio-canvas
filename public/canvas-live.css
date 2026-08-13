@@ -1372,9 +1372,11 @@ body,
 
 .skill-quick-action:disabled { cursor: wait; opacity: 0.72; }
 .skill-quick-icon { font-size: 14px; font-weight: 800; line-height: 1; }
+.skill-verify-action { color: var(--ink-2); }
 .skill-quick-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 @media (max-width: 460px) {
   .skill-quick-action { width: 30px; justify-content: center; padding: 0; }
-  .skill-quick-action #installSkillLabel { display: none; }
+  .skill-quick-action #installSkillLabel,
+  .skill-quick-action #verifySkillLabel { display: none; }
 }

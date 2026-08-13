@@ -57,9 +57,7 @@ REQUEST_TIMEOUT_MS=180000
 
 ## Codex Skill
 
-On the host computer, click `导入 Skill` in the top bar. It installs the bundled Image2 Skill into the local Agent directories and preserves the previous installation until the replacement is ready.
-
-The PowerShell installer uses the current Image2 Studio local/LAN source first, then falls back to the public GitHub `main.zip` when the local source is unavailable. For access through a public reverse proxy, set `IMAGE2_PUBLIC_BASE_URL` to the proxy's HTTPS origin.
+Open the running webpage from the computer where the Skill should be installed, then click `安装 Skill` in the top bar and execute the copied PowerShell command. The Skill is downloaded only from that running Image2 Studio instance, dynamically binds the address and port used to access the webpage, and installs into both `~/.agents/skills` and `~/.codex/skills`. Click `验证` to copy a command that checks both installations and service connectivity. The service must remain reachable; there is no GitHub installation fallback. For access through a public reverse proxy, set `IMAGE2_PUBLIC_BASE_URL` to the proxy's HTTPS origin.
 
 OpenAI-compatible channels can also be declared through numbered environment variables:
 

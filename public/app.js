@@ -74,6 +74,8 @@ const appearanceNameInput = document.querySelector('#appearanceName');
 const appearanceIconInput = document.querySelector('#appearanceIcon');
 const installSkillButton = document.querySelector('#installSkillButton');
 const installSkillLabel = document.querySelector('#installSkillLabel');
+const verifySkillButton = document.querySelector('#verifySkillButton');
+const verifySkillLabel = document.querySelector('#verifySkillLabel');
 const skillInstallStatus = document.querySelector('#skillInstallStatus');
 const imageInputBox = document.querySelector('#imageInputBox');
 const inputImage = document.querySelector('#inputImage');
@@ -157,6 +159,7 @@ let previewingMember = false;
 // 本次生成区的图片数据。resumeActiveJob → pollJob → renderGallery 会在顶层 await
 // 之后立刻触达它，所以同样必须声明在这里。
 let currentGalleryEntries = [];
+const MEMBER_COMPOSER_HINT = '提交后可以关掉页面，任务在服务器上继续跑，回来会自动接上进度。';
 let lightboxZoom = { scale: 1, x: 0, y: 0 };
 let lightboxDrag = null;
 let lightboxDragMoved = false;
@@ -228,7 +231,8 @@ appearanceForm?.addEventListener('submit', async (event) => {
   await saveAppearance();
 });
 
-installSkillButton?.addEventListener('click', installSkillLocally);
+installSkillButton?.addEventListener('click', copySkillInstallCommand);
+verifySkillButton?.addEventListener('click', copySkillVerifyCommand);
 
 testChannelSelect.addEventListener('change', async () => {
   await loadModels({ log: false });
@@ -929,33 +933,83 @@ async function refreshAll() {
   await loadModels({ log: false });
 }
 
-async function installSkillLocally() {
+async function copySkillInstallCommand() {
   if (!installSkillButton) return;
-  const originalText = installSkillLabel?.textContent || '导入 Skill';
+  const originalText = installSkillLabel?.textContent || '安装 Skill';
   installSkillButton.disabled = true;
   installSkillButton.setAttribute('aria-busy', 'true');
-  if (installSkillLabel) installSkillLabel.textContent = '导入中...';
+  if (installSkillLabel) installSkillLabel.textContent = '准备中...';
   try {
-    const response = await apiFetch('/api/codex-skill/install-local', {
-      method: 'POST',
-      headers: { 'X-Image2-Local-Install': '1' },
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(String(payload.error || `安装失败：${response.status}`));
-
-    if (installSkillLabel) installSkillLabel.textContent = '已导入';
-    if (skillInstallStatus) skillInstallStatus.textContent = 'Image2 Skill 已导入本机 Agent，重启 Codex 后即可调用';
-    showSuccess('Image2 Skill 已导入。重启 Codex 后即可调用。');
-    addLog(`Image2 Skill 已安装到 ${Array.isArray(payload.targets) ? payload.targets.length : 0} 个本机目录`);
+    const response = await apiFetch('/api/codex-skill/install-command');
+    const command = String(await response.text()).trim();
+    if (!response.ok) throw new Error(command || `准备失败：${response.status}`);
+    if (!command) throw new Error('服务未返回安装命令');
+    await writeClipboard(command);
+    const serverUrl = response.headers.get('X-Image2-Skill-Server') || window.location.origin;
+    if (installSkillLabel) installSkillLabel.textContent = '已复制';
+    if (skillInstallStatus) skillInstallStatus.textContent = `安装命令已复制，Skill 将绑定 ${serverUrl}`;
+    showSuccess(`安装命令已复制，已绑定 ${serverUrl}`);
+    addLog(`已复制 Image2 Skill 安装命令：${serverUrl}`);
     setTimeout(() => { if (installSkillLabel) installSkillLabel.textContent = originalText; }, 1800);
   } catch (error) {
-    if (skillInstallStatus) skillInstallStatus.textContent = `本机安装失败：${error.message}`;
-    showError(`Image2 Skill 导入失败：${error.message}`);
-    addLog(`Image2 Skill 本机安装失败：${error.message}`, true);
+    if (skillInstallStatus) skillInstallStatus.textContent = `安装命令准备失败：${error.message}`;
+    showError(`Image2 Skill 安装命令准备失败：${error.message}`);
+    addLog(`Image2 Skill 安装命令准备失败：${error.message}`, true);
   } finally {
     installSkillButton.disabled = false;
     installSkillButton.removeAttribute('aria-busy');
   }
+}
+
+async function copySkillVerifyCommand() {
+  if (!verifySkillButton) return;
+  const originalText = verifySkillLabel?.textContent || '验证';
+  verifySkillButton.disabled = true;
+  verifySkillButton.setAttribute('aria-busy', 'true');
+  if (verifySkillLabel) verifySkillLabel.textContent = '准备中...';
+  try {
+    const response = await apiFetch('/api/codex-skill/verify-command');
+    const command = String(await response.text()).trim();
+    if (!response.ok) throw new Error(command || `准备失败：${response.status}`);
+    if (!command) throw new Error('服务未返回验证命令');
+    await writeClipboard(command);
+    const serverUrl = response.headers.get('X-Image2-Skill-Server') || window.location.origin;
+    if (verifySkillLabel) verifySkillLabel.textContent = '已复制';
+    if (skillInstallStatus) skillInstallStatus.textContent = `验证命令已复制，将检查 ${serverUrl}`;
+    showSuccess(`验证命令已复制，将检查 ${serverUrl}`);
+    addLog(`已复制 Image2 Skill 验证命令：${serverUrl}`);
+    setTimeout(() => { if (verifySkillLabel) verifySkillLabel.textContent = originalText; }, 1800);
+  } catch (error) {
+    if (skillInstallStatus) skillInstallStatus.textContent = `验证命令准备失败：${error.message}`;
+    showError(`Image2 Skill 验证命令准备失败：${error.message}`);
+    addLog(`Image2 Skill 验证命令准备失败：${error.message}`, true);
+  } finally {
+    verifySkillButton.disabled = false;
+    verifySkillButton.removeAttribute('aria-busy');
+  }
+}
+
+async function writeClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall back for private-network HTTP pages where Clipboard API is blocked.
+    }
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) throw new Error('浏览器不允许写入剪贴板');
 }
 
 // Reattach to a generation that was still running when the tab was closed.
@@ -1936,8 +1990,6 @@ async function saveAdminChannel() {
   await loadModels({ log: false });
   await loadAuditLog();
 }
-
-const MEMBER_COMPOSER_HINT = '提交后可以关掉页面，任务在服务器上继续跑，回来会自动接上进度。';
 
 function updateGenerateChannelSummary(channel = null) {
   if (!generateChannelSummary) return;
